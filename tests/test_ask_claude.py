@@ -73,6 +73,22 @@ class Command(unittest.TestCase):
         argv = ask_claude.command("/usr/bin/claude", self.target, "", bypass=False)
         self.assertEqual(argv[4:], ["/usr/bin/claude"])
 
+    def test_print_mode_runs_claude_p_inside_a_shell_that_waits_for_a_key(self):
+        argv = ask_claude.command("/usr/bin/claude", self.target, "explain", bypass=False, once=True)
+        self.assertEqual(argv[:4], ["gnome-terminal", "--working-directory=/home/u/My Dir", "--title=Claude · notes.txt", "--"])
+        self.assertEqual(argv[4:6], ["bash", "-c"])
+        self.assertIn('"$@"', argv[6])
+        self.assertIn("read ", argv[6])
+        self.assertEqual(argv[7:], ["ask-claude", "/usr/bin/claude", "-p", "explain\n\nSelected: /home/u/My Dir/notes.txt"])
+
+    def test_print_mode_with_bypass_keeps_the_flag_before_the_prompt(self):
+        argv = ask_claude.command("/usr/bin/claude", self.target, "fix it", bypass=True, once=True)
+        self.assertEqual(argv[9:], ["-p", "--dangerously-skip-permissions", "fix it\n\nSelected: /home/u/My Dir/notes.txt"])
+
+    def test_print_mode_with_empty_request_falls_back_to_a_session(self):
+        argv = ask_claude.command("/usr/bin/claude", self.target, "", bypass=False, once=True)
+        self.assertEqual(argv[4:], ["/usr/bin/claude"])
+
     def test_multi_select_lists_every_path(self):
         t = ask_claude.Target(folder="/d", name="2 items", selected=["/d/a", "/d/b"])
         self.assertEqual(ask_claude.command("c", t, "diff", bypass=False)[-1], "diff\n\nSelected: /d/a\n/d/b")

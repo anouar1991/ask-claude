@@ -41,18 +41,23 @@ def find_claude(env) -> Optional[str]:
     return shutil.which("claude", path=env.get("PATH", "")) or (fallback if os.access(fallback, os.X_OK) else None)
 
 
-def command(claude: str, target: Target, request: str, bypass: bool) -> List[str]:
+# claude -p exits as soon as it has answered; this keeps the terminal open to read it.
+KEEP_OPEN = 'printf "Asking Claude…\\n\\n"; "$@"; printf "\\n"; read -rsn1 -p "Press any key to close"'
+
+
+def command(claude: str, target: Target, request: str, bypass: bool, once: bool = False) -> List[str]:
     """The gnome-terminal argv that runs Claude Code in the target folder."""
-    argv = ["gnome-terminal", f"--working-directory={target.folder}", f"--title=Claude · {target.name}", "--", claude]
-    if bypass:
-        argv.append("--dangerously-skip-permissions")
+    once = once and bool(request)  # nothing to print without a request: open a session instead
+    run = [claude] + (["-p"] if once else []) + (["--dangerously-skip-permissions"] if bypass else [])
     if request:
-        argv.append(f"{request}\n\nSelected: " + "\n".join(target.selected))
-    return argv
+        run.append(f"{request}\n\nSelected: " + "\n".join(target.selected))
+    if once:
+        run = ["bash", "-c", KEEP_OPEN, "ask-claude", *run]
+    return ["gnome-terminal", f"--working-directory={target.folder}", f"--title=Claude · {target.name}", "--", *run]
 
 
 def ask(target: Target):
-    """The dialog. Returns (request, bypass) or None when cancelled."""
+    """The dialog. Returns (request, bypass, once) or None when cancelled."""
     import gi
     gi.require_version("Gtk", "3.0")
     from gi.repository import GLib, Gtk, Pango
@@ -71,16 +76,23 @@ def ask(target: Target):
     folder = Gtk.Label(label="in " + where, xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
     folder.get_style_context().add_class("dim-label")
     entry = Gtk.Entry(placeholder_text="Leave empty to just open Claude Code here", activates_default=True, margin_top=6)
+    once = Gtk.CheckButton(label="_Just answer, no session", use_underline=True, margin_top=6, sensitive=False)
+    once_note = Gtk.Label(label="Prints the answer and exits (claude -p). Read-only unless permissions are skipped.",
+                          xalign=0, wrap=True, margin_start=24)
     skip = Gtk.CheckButton(label="_Skip permission prompts", use_underline=True, margin_top=6)
     note = Gtk.Label(label="Claude edits files and runs commands here without asking.", xalign=0, margin_start=24)
-    note.get_style_context().add_class("dim-label")
+    for hint in (once_note, note):
+        hint.get_style_context().add_class("dim-label")
+    entry.connect("changed", lambda e: once.set_sensitive(bool(e.get_text().strip())))
 
     box = dialog.get_content_area()
-    for widget in (title, folder, entry, skip, note):
+    for widget in (title, folder, entry, once, once_note, skip, note):
         box.pack_start(widget, False, False, 0)
     dialog.show_all()
     entry.grab_focus()
-    answer = (entry.get_text().strip(), skip.get_active()) if dialog.run() == Gtk.ResponseType.OK else None
+    answer = None
+    if dialog.run() == Gtk.ResponseType.OK:
+        answer = (entry.get_text().strip(), skip.get_active(), once.get_active())
     dialog.destroy()
     return answer
 
@@ -108,8 +120,8 @@ def main() -> int:
     answer = ask(target)
     if answer is None:
         return 0
-    request, bypass = answer
-    os.execvp("gnome-terminal", command(claude, target, request, bypass))
+    request, bypass, once = answer
+    os.execvp("gnome-terminal", command(claude, target, request, bypass, once))
     return 1  # execvp does not return
 
 
