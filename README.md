@@ -6,6 +6,7 @@ Right-click a file or folder in GNOME Files, choose **Scripts → Ask Claude**, 
 
 - GNOME Files (Nautilus). Tested on Nautilus 42, Ubuntu 22.04.
 - `gnome-terminal`, and Python 3 with PyGObject (`python3-gi`). Both ship with Ubuntu and Fedora GNOME desktops.
+- `sudo` 1.8 or later for the **Use sudo** option (it runs the askpass helper by itself when no terminal is present).
 - [Claude Code](https://code.claude.com/docs/en/overview) installed, with `claude` in your `PATH` or at `~/.local/bin/claude`.
 
 ## Install
@@ -25,6 +26,7 @@ This copies the script to `~/.local/share/nautilus/scripts/Ask Claude`. Files wa
 3. Type your request, for example *rename these photos by date* or *explain this log*. Leave it empty to just open Claude Code there.
    Tick **Just answer, no session** for a one-shot reply: Claude prints its answer in the terminal and exits (`claude -p`), and the terminal waits for a key press before closing. Nobody can approve a tool call in that mode, so it is read-only unless you also tick the next box.
    Tick **Skip permission prompts** if Claude may edit files and run commands in that folder without asking first. That is Claude Code's `--dangerously-skip-permissions`: use it only where you can afford every change it might make.
+   Tick **Use sudo** if the job needs root. Whenever one of Claude's commands calls `sudo`, a password dialog appears; the password goes straight to `sudo`, the script never keeps it. See [sudo](#sudo) below.
 4. A terminal opens in that folder with Claude Code running. The selected paths are appended to your request.
 
 ## How it works
@@ -32,6 +34,12 @@ This copies the script to `~/.local/share/nautilus/scripts/Ask Claude`. Files wa
 GNOME Files lists every executable in `~/.local/share/nautilus/scripts/` under the Scripts menu. When one runs, Files passes the selected paths in `NAUTILUS_SCRIPT_SELECTED_FILE_PATHS` and the current folder in `NAUTILUS_SCRIPT_CURRENT_URI`.
 
 The script is a single Python file: resolve the folder, show a small GTK dialog (request, two checkboxes), then launch `gnome-terminal --working-directory=<folder> -- claude [-p] [--dangerously-skip-permissions] "<request>"`. With `-p` the call is wrapped in a shell that waits for a key, because gnome-terminal closes as soon as the command exits. It runs on `/usr/bin/python3` on purpose, because that is where the system's PyGObject lives.
+
+## sudo
+
+Claude Code runs each command without a terminal, so `sudo` cannot ask for a password there, and a credential cached in the terminal window does not reach those commands either. With **Use sudo** ticked, the session gets `SUDO_ASKPASS` pointing at a throwaway helper that opens this script's password dialog. sudo calls it by itself when it has no terminal. The helper lives under `$XDG_RUNTIME_DIR` and is removed when the session ends.
+
+By default sudo caches the credential per command invocation only, so expect one dialog per command that needs root. If that is too much for your machine, sudo can cache per user instead of per terminal: run `sudo visudo` and add `Defaults:YOUR_USER timestamp_type=global` (then the dialog appears once and sudo remembers it for 15 minutes, for every process you run, not only Claude's).
 
 ## Uninstall
 

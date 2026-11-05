@@ -41,23 +41,42 @@ def find_claude(env) -> Optional[str]:
     return shutil.which("claude", path=env.get("PATH", "")) or (fallback if os.access(fallback, os.X_OK) else None)
 
 
-# claude -p exits as soon as it has answered; this keeps the terminal open to read it.
-KEEP_OPEN = 'printf "Asking Claude…\\n\\n"; "$@"; printf "\\n"; read -rsn1 -p "Press any key to close"'
+SELF = os.path.abspath(__file__)
 
 
-def command(claude: str, target: Target, request: str, bypass: bool, once: bool = False) -> List[str]:
+def sudo_setup() -> str:
+    """Shell that points sudo at this script's password dialog for the session.
+
+    Claude Code runs commands without a terminal, so sudo cannot read a password
+    there and cannot reuse a credential cached on the terminal. It will run the
+    SUDO_ASKPASS helper instead: a throwaway script in the runtime dir that calls
+    us with --askpass. Removed when the session ends."""
+    helper = 'exec "%s" --askpass "$@"' % SELF  # the install path holds no quotes
+    return ('h=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/ask-claude.XXXXXX")'
+            " && printf '%s\\n' '#!/bin/sh' '" + helper + "' > \"$h/askpass\""
+            ' && chmod 700 "$h/askpass" && export SUDO_ASKPASS="$h/askpass"'
+            "; trap 'rm -rf \"$h\"' EXIT")
+
+
+def command(claude: str, target: Target, request: str, *, bypass: bool = False, once: bool = False,
+            sudo: bool = False) -> List[str]:
     """The gnome-terminal argv that runs Claude Code in the target folder."""
     once = once and bool(request)  # nothing to print without a request: open a session instead
     run = [claude] + (["-p"] if once else []) + (["--dangerously-skip-permissions"] if bypass else [])
     if request:
         run.append(f"{request}\n\nSelected: " + "\n".join(target.selected))
-    if once:
-        run = ["bash", "-c", KEEP_OPEN, "ask-claude", *run]
+    if once or sudo:
+        steps = [sudo_setup()] if sudo else []
+        if once:  # claude -p exits as soon as it has answered; keep the terminal open to read it
+            steps += ['printf "Asking Claude…\\n\\n"', '"$@"; status=$?', 'printf "\\n"; read -rsn1 -p "Press any key to close"']
+        else:
+            steps += ['"$@"; status=$?']
+        run = ["bash", "-c", "; ".join(steps + ["exit $status"]), "ask-claude", *run]
     return ["gnome-terminal", f"--working-directory={target.folder}", f"--title=Claude · {target.name}", "--", *run]
 
 
 def ask(target: Target):
-    """The dialog. Returns (request, bypass, once) or None when cancelled."""
+    """The dialog. Returns (request, bypass, once, sudo) or None when cancelled."""
     import gi
     gi.require_version("Gtk", "3.0")
     from gi.repository import GLib, Gtk, Pango
@@ -81,20 +100,51 @@ def ask(target: Target):
                           xalign=0, wrap=True, margin_start=24)
     skip = Gtk.CheckButton(label="_Skip permission prompts", use_underline=True, margin_top=6)
     note = Gtk.Label(label="Claude edits files and runs commands here without asking.", xalign=0, margin_start=24)
-    for hint in (once_note, note):
+    sudo = Gtk.CheckButton(label="_Use sudo", use_underline=True, margin_top=6)
+    sudo_note = Gtk.Label(label="Claude may run sudo. A password dialog appears whenever a command needs it.",
+                          xalign=0, wrap=True, margin_start=24)
+    for hint in (once_note, note, sudo_note):
         hint.get_style_context().add_class("dim-label")
     entry.connect("changed", lambda e: once.set_sensitive(bool(e.get_text().strip())))
 
     box = dialog.get_content_area()
-    for widget in (title, folder, entry, once, once_note, skip, note):
+    for widget in (title, folder, entry, once, once_note, skip, note, sudo, sudo_note):
         box.pack_start(widget, False, False, 0)
     dialog.show_all()
     entry.grab_focus()
     answer = None
     if dialog.run() == Gtk.ResponseType.OK:
-        answer = (entry.get_text().strip(), skip.get_active(), once.get_active())
+        answer = (entry.get_text().strip(), skip.get_active(), once.get_active(), sudo.get_active())
     dialog.destroy()
     return answer
+
+
+def askpass(prompt: str) -> int:
+    """SUDO_ASKPASS mode: ask for the password and hand it to sudo on stdout."""
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    dialog = Gtk.Dialog(title="Ask Claude", border_width=12)
+    dialog.set_position(Gtk.WindowPosition.CENTER)
+    dialog.set_keep_above(True)
+    dialog.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+    dialog.add_button("_Authorize", Gtk.ResponseType.OK).get_style_context().add_class("suggested-action")
+    dialog.set_default_response(Gtk.ResponseType.OK)
+    label = Gtk.Label(label="Claude wants to run a command with sudo.", xalign=0)
+    hint = Gtk.Label(label=prompt.strip() or "Password:", xalign=0, margin_top=6)
+    hint.get_style_context().add_class("dim-label")
+    entry = Gtk.Entry(visibility=False, activates_default=True, input_purpose=Gtk.InputPurpose.PASSWORD, margin_top=6)
+    box = dialog.get_content_area()
+    for widget in (label, hint, entry):
+        box.pack_start(widget, False, False, 0)
+    dialog.show_all()
+    entry.grab_focus()
+    ok = dialog.run() == Gtk.ResponseType.OK
+    if ok:
+        print(entry.get_text())
+    dialog.destroy()
+    return 0 if ok else 1
 
 
 def error(text: str, detail: str):
@@ -109,6 +159,8 @@ def error(text: str, detail: str):
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["--askpass"]:
+        return askpass(sys.argv[2] if len(sys.argv) > 2 else "")
     target = resolve(os.environ)
     if target is None:
         error("Ask Claude works on local folders only.", os.environ.get("NAUTILUS_SCRIPT_CURRENT_URI", ""))
@@ -120,8 +172,8 @@ def main() -> int:
     answer = ask(target)
     if answer is None:
         return 0
-    request, bypass, once = answer
-    os.execvp("gnome-terminal", command(claude, target, request, bypass, once))
+    request, bypass, once, sudo = answer
+    os.execvp("gnome-terminal", command(claude, target, request, bypass=bypass, once=once, sudo=sudo))
     return 1  # execvp does not return
 
 

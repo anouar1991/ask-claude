@@ -89,6 +89,37 @@ class Command(unittest.TestCase):
         argv = ask_claude.command("/usr/bin/claude", self.target, "", bypass=False, once=True)
         self.assertEqual(argv[4:], ["/usr/bin/claude"])
 
+    def test_sudo_points_sudo_at_this_script_as_askpass_helper(self):
+        argv = ask_claude.command("/usr/bin/claude", self.target, "update packages", bypass=False, sudo=True)
+        self.assertEqual(argv[4:6], ["bash", "-c"])
+        script = argv[6]
+        self.assertLess(script.index("export SUDO_ASKPASS"), script.index('"$@"; status=$?'))
+        self.assertIn("--askpass", script)
+        self.assertEqual(argv[7:], ["ask-claude", "/usr/bin/claude", "update packages\n\nSelected: /home/u/My Dir/notes.txt"])
+
+    def test_sudo_wrapper_really_installs_a_working_helper_for_the_session(self):
+        argv = ask_claude.command("/usr/bin/claude", self.target, "x", bypass=False, sudo=True)
+        with tempfile.TemporaryDirectory() as run:
+            # run the generated wrapper with a probe instead of claude: print the helper sudo would execute
+            probe = ["sh", "-c", 'cat "$SUDO_ASKPASS"; ls "$(dirname "$SUDO_ASKPASS")" > "%s/left"' % run]
+            r = subprocess.run(argv[4:8] + probe, capture_output=True, text=True, env={"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": run})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.splitlines(), ["#!/bin/sh", 'exec "%s" --askpass "$@"' % ask_claude.SELF])
+            self.assertEqual(os.listdir(run), ["left"], "helper directory must be removed when the session ends")
+
+    def test_sudo_with_empty_request_still_wraps_the_session(self):
+        argv = ask_claude.command("/usr/bin/claude", self.target, "", bypass=False, sudo=True)
+        self.assertIn("SUDO_ASKPASS", argv[6])
+        self.assertEqual(argv[7:], ["ask-claude", "/usr/bin/claude"])
+
+    def test_sudo_and_print_mode_combine_in_one_wrapper(self):
+        argv = ask_claude.command("/usr/bin/claude", self.target, "explain", bypass=True, once=True, sudo=True)
+        script = argv[6]
+        self.assertIn("SUDO_ASKPASS", script)
+        self.assertIn("read ", script)
+        self.assertEqual(argv[7:], ["ask-claude", "/usr/bin/claude", "-p", "--dangerously-skip-permissions",
+                                    "explain\n\nSelected: /home/u/My Dir/notes.txt"])
+
     def test_multi_select_lists_every_path(self):
         t = ask_claude.Target(folder="/d", name="2 items", selected=["/d/a", "/d/b"])
         self.assertEqual(ask_claude.command("c", t, "diff", bypass=False)[-1], "diff\n\nSelected: /d/a\n/d/b")
