@@ -5,7 +5,7 @@ Right-click a file or folder in GNOME Files, choose **Scripts → Ask Claude**, 
 ## Requirements
 
 - GNOME Files (Nautilus). Tested on Nautilus 42, Ubuntu 22.04.
-- `gnome-terminal` and `zenity`. Both ship with Ubuntu GNOME.
+- `gnome-terminal`, and Python 3 with PyGObject (`python3-gi`). Both ship with Ubuntu and Fedora GNOME desktops.
 - [Claude Code](https://code.claude.com/docs/en/overview) installed, with `claude` in your `PATH` or at `~/.local/bin/claude`.
 
 ## Install
@@ -23,13 +23,14 @@ This copies the script to `~/.local/share/nautilus/scripts/Ask Claude`. Files wa
 1. Right-click a file, a folder, or the empty space inside a folder.
 2. Choose **Scripts → Ask Claude**.
 3. Type your request, for example *rename these photos by date* or *explain this log*. Leave it empty to just open Claude Code there.
+   Tick **Skip permission prompts** if Claude may edit files and run commands in that folder without asking first. That is Claude Code's `--dangerously-skip-permissions`: use it only where you can afford every change it might make.
 4. A terminal opens in that folder with Claude Code running. The selected paths are appended to your request.
 
 ## How it works
 
 GNOME Files lists every executable in `~/.local/share/nautilus/scripts/` under the Scripts menu. When one runs, Files passes the selected paths in `NAUTILUS_SCRIPT_SELECTED_FILE_PATHS` and the current folder in `NAUTILUS_SCRIPT_CURRENT_URI`.
 
-The script is about 25 lines of bash: resolve the folder, ask with `zenity --entry`, then launch `gnome-terminal --working-directory=<folder> -- claude "<request>"`.
+The script is a single Python file: resolve the folder, show a small GTK dialog (request, permission checkbox), then launch `gnome-terminal --working-directory=<folder> -- claude [--dangerously-skip-permissions] "<request>"`. It runs on `/usr/bin/python3` on purpose, because that is where the system's PyGObject lives.
 
 ## Uninstall
 
@@ -40,10 +41,10 @@ rm ~/.local/share/nautilus/scripts/"Ask Claude"
 ## Test
 
 ```bash
-bash tests/test.sh
+python3 tests/test_ask_claude.py
 ```
 
-Runs the script against stubbed `zenity`, `gnome-terminal` and `claude`. No GUI needed.
+Unit tests for path resolution, the launched command and the installer. No GUI needed.
 
 ## Not yet supported
 

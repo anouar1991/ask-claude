@@ -1,30 +1,117 @@
-#!/bin/bash
-# Ask Claude — a GNOME Files (Nautilus) script.
-# Right-click a file or folder → Scripts → Ask Claude: type what you want,
-# and Claude Code opens in a terminal at that location with your request.
-set -u
+#!/usr/bin/python3
+"""Ask Claude — a GNOME Files (Nautilus) script.
 
-mapfile -t selected <<< "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}"
-uri="${NAUTILUS_SCRIPT_CURRENT_URI:-}"
-here="$(printf '%b' "${uri//%/\\x}")"   # %20 → space, %C3%A9 → é
-here="${here#file://}"
-target="${selected[0]:-$here}"
-if [ -d "$target" ]; then dir="$target"; else dir="$(dirname "$target")"; fi
-name="$(basename "$target")"
+Right-click a file or folder → Scripts → Ask Claude: type what you want,
+tick "Skip permission prompts" if Claude may act without asking, and
+Claude Code opens in a terminal at that location with your request.
 
-claude="$(command -v claude || echo "$HOME/.local/bin/claude")"
-if [ ! -x "$claude" ]; then
-  zenity --error --title="Ask Claude" --text="Claude Code (claude) was not found."$'\n'"Install it from https://code.claude.com"
-  exit 1
-fi
-if [ ! -d "$dir" ]; then
-  zenity --error --title="Ask Claude" --text="Ask Claude works on local folders only."$'\n'"$uri"
-  exit 1
-fi
+Runs on the system Python on purpose: that is where PyGObject (GTK) lives.
+"""
+import os
+import shutil
+import sys
+from typing import List, NamedTuple, Optional
+from urllib.parse import unquote
 
-label="${name//_/__}"   # zenity reads a single _ as a mnemonic marker and hides it
-ask="$(zenity --entry --title="Ask Claude" --text="What should Claude do with “$label”?")" || exit 0
 
-prompt=()
-[ -n "$ask" ] && prompt=("$ask"$'\n\n'"Selected: ${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-$here}")
-exec gnome-terminal --working-directory="$dir" --title="Claude · $name" -- "$claude" "${prompt[@]}"
+class Target(NamedTuple):
+    folder: str          # where the terminal and Claude Code start
+    name: str            # what the dialog shows: file name, folder name, or "N items"
+    selected: List[str]  # paths appended to the request
+
+
+def resolve(env) -> Optional[Target]:
+    """Turn Files' environment into a Target, or None when the location is not a local folder."""
+    selected = [p for p in env.get("NAUTILUS_SCRIPT_SELECTED_FILE_PATHS", "").split("\n") if p]
+    uri = env.get("NAUTILUS_SCRIPT_CURRENT_URI", "")
+    here = unquote(uri[len("file://"):]) if uri.startswith("file://") else None
+    target = selected[0] if selected else here
+    if not target:
+        return None
+    folder = target if os.path.isdir(target) else os.path.dirname(target)
+    if not os.path.isdir(folder):
+        return None
+    name = f"{len(selected)} items" if len(selected) > 1 else os.path.basename(target)
+    return Target(folder, name, selected or [folder])
+
+
+def find_claude(env) -> Optional[str]:
+    """`claude` from PATH, else Claude Code's default install path, else None."""
+    fallback = os.path.join(env.get("HOME", ""), ".local", "bin", "claude")
+    return shutil.which("claude", path=env.get("PATH", "")) or (fallback if os.access(fallback, os.X_OK) else None)
+
+
+def command(claude: str, target: Target, request: str, bypass: bool) -> List[str]:
+    """The gnome-terminal argv that runs Claude Code in the target folder."""
+    argv = ["gnome-terminal", f"--working-directory={target.folder}", f"--title=Claude · {target.name}", "--", claude]
+    if bypass:
+        argv.append("--dangerously-skip-permissions")
+    if request:
+        argv.append(f"{request}\n\nSelected: " + "\n".join(target.selected))
+    return argv
+
+
+def ask(target: Target):
+    """The dialog. Returns (request, bypass) or None when cancelled."""
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import GLib, Gtk, Pango
+
+    dialog = Gtk.Dialog(title="Ask Claude", border_width=12)
+    dialog.set_default_size(540, -1)
+    dialog.set_position(Gtk.WindowPosition.CENTER)
+    dialog.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+    dialog.add_button("_Ask Claude", Gtk.ResponseType.OK).get_style_context().add_class("suggested-action")
+    dialog.set_default_response(Gtk.ResponseType.OK)
+
+    home = os.path.expanduser("~")
+    where = "~" + target.folder[len(home):] if target.folder.startswith(home) else target.folder
+    title = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
+    title.set_markup("<b>What should Claude do with %s?</b>" % GLib.markup_escape_text(target.name))
+    folder = Gtk.Label(label="in " + where, xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
+    folder.get_style_context().add_class("dim-label")
+    entry = Gtk.Entry(placeholder_text="Leave empty to just open Claude Code here", activates_default=True, margin_top=6)
+    skip = Gtk.CheckButton(label="_Skip permission prompts", use_underline=True, margin_top=6)
+    note = Gtk.Label(label="Claude edits files and runs commands here without asking.", xalign=0, margin_start=24)
+    note.get_style_context().add_class("dim-label")
+
+    box = dialog.get_content_area()
+    for widget in (title, folder, entry, skip, note):
+        box.pack_start(widget, False, False, 0)
+    dialog.show_all()
+    entry.grab_focus()
+    answer = (entry.get_text().strip(), skip.get_active()) if dialog.run() == Gtk.ResponseType.OK else None
+    dialog.destroy()
+    return answer
+
+
+def error(text: str, detail: str):
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    dialog = Gtk.MessageDialog(title="Ask Claude", message_type=Gtk.MessageType.ERROR,
+                               buttons=Gtk.ButtonsType.CLOSE, text=text, secondary_text=detail)
+    dialog.run()
+    dialog.destroy()
+
+
+def main() -> int:
+    target = resolve(os.environ)
+    if target is None:
+        error("Ask Claude works on local folders only.", os.environ.get("NAUTILUS_SCRIPT_CURRENT_URI", ""))
+        return 1
+    claude = find_claude(os.environ)
+    if claude is None:
+        error("Claude Code (claude) was not found.", "Install it from https://code.claude.com")
+        return 1
+    answer = ask(target)
+    if answer is None:
+        return 0
+    request, bypass = answer
+    os.execvp("gnome-terminal", command(claude, target, request, bypass))
+    return 1  # execvp does not return
+
+
+if __name__ == "__main__":
+    sys.exit(main())
