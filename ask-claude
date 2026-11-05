@@ -1,0 +1,30 @@
+#!/bin/bash
+# Ask Claude — a GNOME Files (Nautilus) script.
+# Right-click a file or folder → Scripts → Ask Claude: type what you want,
+# and Claude Code opens in a terminal at that location with your request.
+set -u
+
+mapfile -t selected <<< "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}"
+uri="${NAUTILUS_SCRIPT_CURRENT_URI:-}"
+here="$(printf '%b' "${uri//%/\\x}")"   # %20 → space, %C3%A9 → é
+here="${here#file://}"
+target="${selected[0]:-$here}"
+if [ -d "$target" ]; then dir="$target"; else dir="$(dirname "$target")"; fi
+name="$(basename "$target")"
+
+claude="$(command -v claude || echo "$HOME/.local/bin/claude")"
+if [ ! -x "$claude" ]; then
+  zenity --error --title="Ask Claude" --text="Claude Code (claude) was not found."$'\n'"Install it from https://code.claude.com"
+  exit 1
+fi
+if [ ! -d "$dir" ]; then
+  zenity --error --title="Ask Claude" --text="Ask Claude works on local folders only."$'\n'"$uri"
+  exit 1
+fi
+
+label="${name//_/__}"   # zenity reads a single _ as a mnemonic marker and hides it
+ask="$(zenity --entry --title="Ask Claude" --text="What should Claude do with “$label”?")" || exit 0
+
+prompt=()
+[ -n "$ask" ] && prompt=("$ask"$'\n\n'"Selected: ${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-$here}")
+exec gnome-terminal --working-directory="$dir" --title="Claude · $name" -- "$claude" "${prompt[@]}"
